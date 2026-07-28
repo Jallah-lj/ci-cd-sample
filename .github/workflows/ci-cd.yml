@@ -1,13 +1,18 @@
-name: CI/CD Pipeline
+name: Comprehensive CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
+  schedule:
+    - cron: '0 0 * * *'  # Nightly build
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [16, 18, 20]
 
     steps:
     - name: Checkout code
@@ -16,18 +21,66 @@ jobs:
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
+        node-version: ${{ matrix.node-version }}
+
+    - name: Cache node modules
+      uses: actions/cache@v3
+      with:
+        path: ~/.npm
+        key: ${{ runner.OS }}-npm-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.OS }}-npm-
+          ${{ runner.OS }}-
 
     - name: Install dependencies
       run: npm install
 
-    - name: Run tests
-      run: npm test
+    - name: Run linter
+      run: npm run lint
 
+    - name: Run tests with coverage
+      run: npm run test:coverage
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: javascript
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
 
   deploy:
-    needs: build
+    needs: [build, security-scan, analyze]
     runs-on: ubuntu-latest
+    env:
+      NODE_ENV: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
 
     steps:
     - name: Checkout code
@@ -41,8 +94,32 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    - name: Start server
-      run: |
-        npm start &
-        sleep 5
-        curl http://localhost:3000
+    - name: Build app
+      run: npm run build
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Deploy to S3
+      run: aws s3 sync build/ s3://my-bucket --delete
+
+    - name: Slack Notification
+      uses: 8398a7/action-slack@v3
+      if: ${{ failure() }}
+      with:
+        payload: |
+          {
+            "text": "CI/CD Pipeline Failed",
+            "attachments": [
+              {
+                "color": "danger",
+                "text": "The CI/CD pipeline has failed. Check the logs for more details."
+              }
+            ]
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
