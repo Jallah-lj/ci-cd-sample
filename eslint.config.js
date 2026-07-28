@@ -5,7 +5,8 @@ module.exports = [
   {
     ignores: [
       "node_modules/**",
-      "coverage/**"
+      "coverage/**",
+      "build/**"
     ]
   },
 
@@ -17,6 +18,9 @@ module.exports = [
       globals: {
         ...globals.node
       }
+    },
+    rules: {
+      "no-unused-vars": ["error", { "caughtErrors": "none", "argsIgnorePattern": "^_" }]
     }
   },
 
