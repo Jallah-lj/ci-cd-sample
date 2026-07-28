@@ -4,122 +4,160 @@ on:
   push:
     branches:
       - main
+
+  pull_request:
+    branches:
+      - main
+
   schedule:
-    - cron: '0 0 * * *'  # Nightly build
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
   build:
+    name: Build & Test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [16, 18, 20]
+        node-version: [22, 24]
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
 
-    - name: Cache node modules
-      uses: actions/cache@v3
-      with:
-        path: ~/.npm
-        key: ${{ runner.OS }}-npm-${{ hashFiles('**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.OS }}-npm-
-          ${{ runner.OS }}-
+      - name: Install Dependencies
+        run: npm ci
 
-    - name: Install dependencies
-      run: npm install
+      - name: Run Linter
+        run: npm run lint
 
-    - name: Run linter
-      run: npm run lint
+      - name: Run Tests
+        run: npm run test:coverage
 
-    - name: Run tests with coverage
-      run: npm run test:coverage
+      - name: Build Project
+        run: npm run build
 
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+      - name: Upload Coverage
+        if: success()
+        uses: codecov/codecov-action@v5
 
   security-scan:
+    name: Trivy Security Scan
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-    - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v2
-      if: always()
-      with:
-        sarif_file: 'trivy-results.sarif'
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy Filesystem Scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload SARIF Results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
 
   analyze:
+    name: CodeQL Analysis
     runs-on: ubuntu-latest
+
     permissions:
+      actions: read
+      contents: read
       security-events: write
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
-      with:
-        languages: javascript
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
 
   deploy:
-    needs: [build, security-scan, analyze]
+    name: Deploy Application
+
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    needs:
+      - build
+      - security-scan
+      - analyze
+
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
     env:
-      NODE_ENV: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+      NODE_ENV: production
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
 
-    - name: Install dependencies
-      run: npm install
+      - name: Install Dependencies
+        run: npm ci
 
-    - name: Build app
-      run: npm run build
+      - name: Build Application
+        run: npm run build
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
 
-    - name: Deploy to S3
-      run: aws s3 sync build/ s3://my-bucket --delete
+      # React (CRA): build/
+      # Vite: change build/ to dist/
+      - name: Deploy to S3
+        run: aws s3 sync build/ s3://my-bucket --delete
 
-    - name: Slack Notification
-      uses: 8398a7/action-slack@v3
-      if: ${{ failure() }}
-      with:
-        payload: |
-          {
-            "text": "CI/CD Pipeline Failed",
-            "attachments": [
-              {
-                "color": "danger",
-                "text": "The CI/CD pipeline has failed. Check the logs for more details."
-              }
-            ]
-          }
-      env:
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      - name: Deployment Successful
+        run: echo "Deployment completed successfully."
+
+      - name: Slack Notification
+        if: failure()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_COLOR: danger
+          SLACK_TITLE: CI/CD Pipeline Failed
+          SLACK_MESSAGE: |
+            The CI/CD pipeline has failed.
+            Please check the GitHub Actions logs.
